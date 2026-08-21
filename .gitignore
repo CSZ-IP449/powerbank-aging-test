@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Build
+build/
+*.spec.bak
+
+# PyInstaller 打包产物
+*.exe
+*.exe.manifest
+
+# Logs
+logs/
+*.log
+sent_data.log
+
+# Data
+data/
+*.json.bak
+
+# Internal docs (not for public repo)
+PROTOCOL.md
+REQUIREMENTS.md
+
+# TypeScript
+*.tsbuildinfo
+
+# Internal test scripts
+test_regression.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db
