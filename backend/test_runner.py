@@ -25,7 +25,7 @@ from stats_store import StatsStore
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "v11.3"
+APP_VERSION = "v11.4"
 
 PHASE_OUT = 'out_warehouse'
 PHASE_IN = 'in_warehouse'
@@ -33,7 +33,7 @@ PHASE_IDLE = 'idle'
 
 DEFAULT_SLOT_TIMEOUT_MS = 5000
 DEFAULT_PHASE_INTERVAL_MS = 3000
-DEFAULT_MAX_RETRY = 2
+DEFAULT_MAX_RETRY = 0
 
 # 失败原因
 FAILURE_REASON_NONE = 0
@@ -402,12 +402,15 @@ class TestRunner:
                 else:
                     deadline = time.monotonic() + timeout_sec
                     final_state = None
-                    while time.monotonic() < deadline:
+                    poll_count = 0
+                    max_polls = 5
+                    while time.monotonic() < deadline and poll_count < max_polls:
                         if not self._pause_event.is_set() or self._has_stop_request():
                             break
                         time.sleep(0.15)
                         self._refresh_slot(slot_no)
                         sv = self._slot_views[slot_no - 1]
+                        poll_count += 1
                         if sv.data.warehouse_state in (int(WarehouseState.OUT_CABINET), int(WarehouseState.ABNORMAL)):
                             final_state = sv
                             break
@@ -555,7 +558,8 @@ class TestRunner:
                     final_state = None
                     poll_count = 0
                     last_state = -1
-                    while time.monotonic() < deadline:
+                    max_polls = 5
+                    while time.monotonic() < deadline and poll_count < max_polls:
                         if not self._pause_event.is_set() or self._has_stop_request():
                             break
                         time.sleep(0.15)

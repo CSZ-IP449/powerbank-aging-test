@@ -7,7 +7,7 @@ export interface TestConfig {
 
 export const DEFAULT_CONFIG: TestConfig = {
   target_test_count: 100,
-  max_retry: 2,
+  max_retry: 0,
   slot_timeout_ms: 5000,
   phase_interval_ms: 3000,
 }
