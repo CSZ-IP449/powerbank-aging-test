@@ -25,7 +25,7 @@ from stats_store import StatsStore
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "v11.4"
+APP_VERSION = "v11.5"
 
 PHASE_OUT = 'out_warehouse'
 PHASE_IN = 'in_warehouse'
@@ -34,6 +34,7 @@ PHASE_IDLE = 'idle'
 DEFAULT_SLOT_TIMEOUT_MS = 5000
 DEFAULT_PHASE_INTERVAL_MS = 3000
 DEFAULT_MAX_RETRY = 0
+DEFAULT_POST_CMD_WAIT_MS = 300
 
 # 失败原因
 FAILURE_REASON_NONE = 0
@@ -59,6 +60,7 @@ class TestConfig:
     max_retry: int = DEFAULT_MAX_RETRY
     slot_timeout_ms: int = DEFAULT_SLOT_TIMEOUT_MS
     phase_interval_ms: int = DEFAULT_PHASE_INTERVAL_MS
+    post_cmd_wait_ms: int = DEFAULT_POST_CMD_WAIT_MS
 
 
 class DeviceAdapter:
@@ -356,25 +358,15 @@ class TestRunner:
         slot_view = self._slot_views[slot_no - 1]
         slot_view.test_direction = int(TestDirection.OUT_TEST)
 
-        precheck_ok = self._validate_out_precheck(slot_no)
-        if not precheck_ok:
-            slot_view.test_state = int(TestState.FAILED)
-            slot_view.app_result = 2
-            slot_view.failure_reason = FAILURE_REASON_PRECHECK
-            self._out_failure_reason[slot_no] = FAILURE_REASON_PRECHECK
-            self._emit_slot(slot_no)
-        else:
-            slot_view.test_state = int(TestState.RUNNING)
-            self._emit_slot(slot_no)
-
         retry = 0
         success = False
         aborted = False
         command_executed = False
         last_error = ''
-        failure_reason = FAILURE_REASON_PRECHECK if not precheck_ok else FAILURE_REASON_OUT
+        failure_reason = FAILURE_REASON_OUT
         timeout_sec = self._config.slot_timeout_ms / 1000.0
         disconnect_detected = False
+        last_precheck_ok = False
         started_monotonic = time.monotonic()
 
         while retry <= self._config.max_retry:
@@ -382,6 +374,29 @@ class TestRunner:
                 self._logger.log_operation('out_aborted', f'slot={slot_no} retry={retry}')
                 aborted = True
                 break
+
+            # retry=0 时 _do_slot 已经执行了出仓前查询；重试时必须重新查询仓道状态
+            if retry > 0:
+                try:
+                    self._refresh_slot(slot_no)
+                except Exception as e:
+                    if _is_disconnect_error(e):
+                        failure_reason = FAILURE_REASON_DISCONNECT
+                        disconnect_detected = True
+                        self._logger.log_operation('out_disconnect', f'slot={slot_no} phase=precheck_retry err={e}')
+                    else:
+                        failure_reason = FAILURE_REASON_COMM
+                        self._logger.log_operation('out_precheck_refresh_error', f'slot={slot_no} retry={retry} err={e}')
+                    break
+
+            precheck_ok = self._validate_out_precheck(slot_no)
+            last_precheck_ok = precheck_ok
+            if not precheck_ok:
+                self._logger.log_operation('out_precheck_fail', f'slot={slot_no} retry={retry}')
+
+            slot_view.test_state = int(TestState.RUNNING)
+            self._emit_slot(slot_no)
+
             try:
                 resp = self._device.cabinet_send(
                     hdlc.build_cabinet_out_frame(slot_no),
@@ -396,32 +411,21 @@ class TestRunner:
                     continue
 
                 command_executed = True
-                if not precheck_ok:
-                    self._refresh_slot(slot_no)
-                    final_state = self._slot_views[slot_no - 1]
-                else:
-                    deadline = time.monotonic() + timeout_sec
-                    final_state = None
-                    poll_count = 0
-                    max_polls = 5
-                    while time.monotonic() < deadline and poll_count < max_polls:
-                        if not self._pause_event.is_set() or self._has_stop_request():
-                            break
-                        time.sleep(0.15)
-                        self._refresh_slot(slot_no)
-                        sv = self._slot_views[slot_no - 1]
-                        poll_count += 1
-                        if sv.data.warehouse_state in (int(WarehouseState.OUT_CABINET), int(WarehouseState.ABNORMAL)):
-                            final_state = sv
-                            break
+                time.sleep(self._config.post_cmd_wait_ms / 1000.0)
+                self._refresh_slot(slot_no)
+                final_state = self._slot_views[slot_no - 1]
 
-                if final_state is None:
-                    raise TimeoutError('out warehouse timeout')
-
-                success = self._evaluate_out(slot_no)
+                eval_ok = self._evaluate_out(slot_no)
+                # 预校验失败 或 物理出仓失败 都视为本次尝试失败
+                success = eval_ok and precheck_ok
                 if success:
-                    break
-                retry += 1
+                    break  # 成功，停止重试
+                # 失败但还有重试次数：进入下一轮完整流程（出仓前查询→下发→出仓后查询）
+                if retry < self._config.max_retry:
+                    retry += 1
+                    continue
+                # 重试耗尽，保留最终失败结果跳出
+                break
             except TimeoutError as e:
                 last_error = str(e)
                 failure_reason = FAILURE_REASON_TIMEOUT
@@ -447,8 +451,7 @@ class TestRunner:
             self._out_failure_reason[slot_no] = FAILURE_REASON_NONE
         elif command_executed:
             self._stats.increment_out(slot_no)
-            out_test_ok = success and precheck_ok
-            if out_test_ok:
+            if success and last_precheck_ok:
                 slot_view.test_state = int(TestState.SUCCESS)
                 slot_view.app_result = 1
                 slot_view.failure_reason = FAILURE_REASON_NONE
@@ -457,7 +460,7 @@ class TestRunner:
                 self._stats.increment_success(slot_no)
                 self._round_out_success[slot_no] = True
             else:
-                if not precheck_ok:
+                if not last_precheck_ok:
                     slot_view.test_state = int(TestState.FAILED)
                     slot_view.app_result = 2
                     slot_view.failure_reason = FAILURE_REASON_PRECHECK
@@ -472,7 +475,7 @@ class TestRunner:
         else:
             slot_view.test_state = int(TestState.FAILED)
             slot_view.app_result = 2
-            if not precheck_ok:
+            if not last_precheck_ok:
                 slot_view.failure_reason = FAILURE_REASON_PRECHECK
                 self._out_failure_reason[slot_no] = FAILURE_REASON_PRECHECK
             else:
@@ -534,6 +537,19 @@ class TestRunner:
                 self._logger.log_operation('in_aborted', f'slot={slot_no} retry={retry}')
                 aborted = True
                 break
+            # retry=0 时 _do_slot 已经刷新过仓道；重试时必须重新查询状态
+            if retry > 0:
+                try:
+                    self._refresh_slot(slot_no)
+                except Exception as e:
+                    if _is_disconnect_error(e):
+                        failure_reason = FAILURE_REASON_DISCONNECT
+                        disconnect_detected = True
+                        self._logger.log_operation('in_disconnect', f'slot={slot_no} phase=precheck_retry err={e}')
+                    else:
+                        failure_reason = FAILURE_REASON_COMM
+                        self._logger.log_operation('in_precheck_refresh_error', f'slot={slot_no} retry={retry} err={e}')
+                    break
             try:
                 self._logger.log_operation('in_send', f'slot={slot_no} sending fixture_in timeout={timeout_sec}')
                 resp = self._device.fixture_send(
@@ -549,39 +565,21 @@ class TestRunner:
                     continue
 
                 command_executed = True
-                out_ok = self._round_out_success.get(slot_no, False)
-                if not out_ok:
-                    self._refresh_slot(slot_no)
-                    final_state = self._slot_views[slot_no - 1]
-                else:
-                    deadline = time.monotonic() + timeout_sec
-                    final_state = None
-                    poll_count = 0
-                    last_state = -1
-                    max_polls = 5
-                    while time.monotonic() < deadline and poll_count < max_polls:
-                        if not self._pause_event.is_set() or self._has_stop_request():
-                            break
-                        time.sleep(0.15)
-                        self._refresh_slot(slot_no)
-                        sv = self._slot_views[slot_no - 1]
-                        poll_count += 1
-                        cur_state = sv.data.warehouse_state
-                        if cur_state != last_state or poll_count <= 2:
-                            self._logger.log_operation('in_poll', f'slot={slot_no} poll={poll_count} state={cur_state} lock={sv.data.lock_button} tray={sv.data.tray_button} detect={sv.data.detect_button} id_ok={sv.data.id_ok}')
-                            last_state = cur_state
-                        if cur_state in (int(WarehouseState.IN_CABINET), int(WarehouseState.ABNORMAL)):
-                            final_state = sv
-                            break
+                time.sleep(self._config.post_cmd_wait_ms / 1000.0)
+                self._refresh_slot(slot_no)
+                final_state = self._slot_views[slot_no - 1]
 
-                if final_state is None:
-                    self._logger.log_operation('in_timeout_detail', f'slot={slot_no} polls={poll_count} last_state={last_state}')
-                    raise TimeoutError('in warehouse timeout')
-
-                success = self._evaluate_in(slot_no)
-                if success:
+                eval_ok = self._evaluate_in(slot_no)
+                if eval_ok:
+                    success = True
                     break
-                retry += 1
+                # 物理进仓失败但仍有重试次数：重试完整流程
+                if retry < self._config.max_retry:
+                    retry += 1
+                    continue
+                # 重试耗尽，保留最终失败
+                success = False
+                break
             except TimeoutError as e:
                 last_error = str(e)
                 failure_reason = FAILURE_REASON_TIMEOUT

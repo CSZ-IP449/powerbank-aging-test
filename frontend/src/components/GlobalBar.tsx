@@ -95,7 +95,7 @@ export function GlobalBar({ onOpenConfig }: { onOpenConfig: () => void }) {
           <span className={`h-1.5 w-1.5 rounded-full ${state.sseConnected ? 'bg-ok' : 'bg-bad'}`} />
           {state.sseConnected ? '已订阅' : '未订阅'}
           <span className="ml-2 rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-white/60">
-            v11.4
+            v11.5
           </span>
         </div>
       </div>

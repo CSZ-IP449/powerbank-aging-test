@@ -1,6 +1,6 @@
 {
   "name": "aging-test-frontend",
-  "version": "0.1.0",
+  "version": "11.5.0",
   "private": true,
   "type": "module",
   "scripts": {

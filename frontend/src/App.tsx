@@ -28,7 +28,7 @@ function MainView() {
           <span>© 2026 进出仓老化测试</span>
           <span className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-ok animate-breathe" />
-            桌面版 v0.1.0
+            桌面版 v11.5
           </span>
         </div>
       </div>

@@ -256,7 +256,7 @@ def create_app() -> Flask:
 
     @app.get('/api/version')
     def version():
-        return jsonify({'name': 'aging-test-app', 'version': '0.1.0'})
+        return jsonify({'name': 'aging-test-app', 'version': '11.5.0'})
 
     @app.get('/api/ports')
     def ports():
